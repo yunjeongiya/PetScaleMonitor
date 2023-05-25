@@ -10,11 +10,13 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({Key? key}) : super(key: key);
 
-  final title = 'Flutter BLE Scan Demo';
+  final title = 'PetScaleMonitor';
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      debugShowCheckedModeBanner: false,
       title: title,
+      theme: ThemeData(primarySwatch: Colors.amber),
       home: MyHomePage(title: title),
     );
   }
@@ -143,7 +145,83 @@ class _MyHomePageState extends State<MyHomePage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.title),
+        title: Text(
+          'Pet Scale Monitor(밥물)',
+          style: TextStyle(
+            color: Colors.white,
+            letterSpacing: 2.0,
+          ),
+        ),
+        backgroundColor: Colors.amber,
+        centerTitle: true,
+        elevation: 0.0,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.bluetooth),
+            onPressed: () {
+              print("search button is clicked");
+            },
+          ),
+        ],
+      ),
+      drawer: Drawer(
+        //
+        child: ListView(
+          padding: EdgeInsets.zero, //
+          children: <Widget>[
+            UserAccountsDrawerHeader(
+              currentAccountPicture: CircleAvatar(
+                backgroundImage: AssetImage('assets/puppy.jpg'),
+                backgroundColor: Colors.white,
+              ),
+              accountName: Text('멍뭉이'),
+              accountEmail: Text('tgool@naver.com'),
+              onDetailsPressed: () {
+                print('arrow is clicked');
+              },
+              decoration: BoxDecoration(
+                color: Colors.amber[200],
+                borderRadius: BorderRadius.only(
+                  bottomLeft: Radius.circular(40.0), // 곡선률 설정
+                  bottomRight: Radius.circular(40.0), //곡선률 설정
+                ),
+              ),
+            ),
+            ListTile(
+              leading: Icon(
+                Icons.home, //
+                color: Colors.grey[850],
+              ),
+              title: Text('Home'),
+              onTap: () {
+                print('Home is clicked');
+              },
+              trailing: Icon(Icons.add),
+            ),
+            ListTile(
+              leading: Icon(
+                Icons.settings, //
+                color: Colors.grey[850],
+              ),
+              title: Text('Setting'),
+              onTap: () {
+                print('setting is clicked');
+              },
+              trailing: Icon(Icons.add),
+            ),
+            ListTile(
+              leading: Icon(
+                Icons.question_answer,
+                color: Colors.grey[850],
+              ),
+              title: Text('Q&A'),
+              onTap: () {
+                print('Q&A is clicked');
+              },
+              trailing: Icon(Icons.add),
+            ),
+          ],
+        ),
       ),
       body: Center(
         child: ListView.separated(
