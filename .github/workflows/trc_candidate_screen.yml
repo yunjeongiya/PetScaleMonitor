@@ -2,8 +2,7 @@ name: TRC alternative application candidate screen
 
 on:
   push:
-    branches:
-      - trc-43-candidate-screen
+    branches: [trc-43-candidate-screen]
   workflow_dispatch:
 
 jobs:
@@ -14,20 +13,17 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install analysis dependencies
-        shell: bash
+      - name: Install dependencies
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install numpy pandas scipy matplotlib scikit-learn xlrd openpyxl
+          python -m pip install -r requirements.txt
 
-      - name: Download fixed-source candidate datasets
-        shell: bash
+      - name: Download fixed-source datasets
         run: |
           set -euo pipefail
           mkdir -p candidate_data/ICLR_2023 candidate_data/ICLR_2024 candidate_data/triage
@@ -42,59 +38,46 @@ jobs:
           test -s candidate_data/triage/CTG.xls
           test -s candidate_data/triage/23_mammography.npz
 
-      - name: Apply audited candidate-script corrections
-        shell: bash
+      - name: Apply audited corrections to triage script
         run: |
           set -euo pipefail
           python - <<'PY'
           from pathlib import Path
-
           p = Path('candidate_experiments/triage_rank_aggregation.py')
           s = p.read_text(encoding='utf-8')
-
           old = '''    wins = np.zeros(n, dtype=float)\n    for col in range(ranks.shape[1]):\n        wins += n - ranks[:, col]\n    return {\n'''
-          new = '''    # Distinct from Borda: emphasize the best position supplied by any\n    # detector and use the mean rank only as a deterministic secondary key.\n    best_rank = pct.min(axis=1)\n    mean_rank = pct.mean(axis=1)\n    return {\n'''
+          new = '''    best_rank = pct.min(axis=1)\n    mean_rank = pct.mean(axis=1)\n    return {\n'''
           if old not in s:
-              raise SystemExit('Expected aggregate preamble not found')
+              raise SystemExit('aggregate preamble not found')
           s = s.replace(old, new, 1)
-          old_line = '        "Pairwise win score": stable_order_desc(wins),\n'
-          new_line = '        "Best-rank fusion": np.lexsort((np.arange(n), mean_rank, best_rank)).astype(int),\n'
-          if old_line not in s:
-              raise SystemExit('Expected pairwise-win return line not found')
-          s = s.replace(old_line, new_line, 1)
+          s = s.replace('        "Pairwise win score": stable_order_desc(wins),\n', '        "Best-rank fusion": np.lexsort((np.arange(n), mean_rank, best_rank)).astype(int),\n', 1)
           s = s.replace('"Pairwise win score"', '"Best-rank fusion"')
-
+          s = s.replace(
+              '    lof = LocalOutlierFactor(n_neighbors=k, novelty=False, n_jobs=-1)\n',
+              '    lof_neighbors = min(n - 1, max(100, 2 * k))\n    lof = LocalOutlierFactor(n_neighbors=lof_neighbors, novelty=False, n_jobs=-1)\n',
+              1,
+          )
           start = s.index('def load_ctg(')
           end = s.index('\n\ndef load_mammography', start)
-          loader = '''def load_ctg(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:\n    # UCI workbook: physiological features are columns 1--21, column 22 is\n    # the auxiliary morphology class, and column 23 is the ordinal NSP label.\n    frame = pd.read_excel(path, sheet_name="Data", skipfooter=3, engine="xlrd")\n    if all(c in frame.columns for c in range(1, 24)):\n        selected = frame[list(range(1, 24))].apply(pd.to_numeric, errors="coerce")\n        features = selected[list(range(1, 22))]\n        target = selected[23]\n    elif "NSP" in frame.columns:\n        feature_names = [\n            "LB", "AC", "FM", "UC", "DL", "DS", "DP", "ASTV",\n            "MSTV", "ALTV", "MLTV", "Width", "Min", "Max", "Nmax",\n            "Nzeros", "Mode", "Mean", "Median", "Variance", "Tendency"\n        ]\n        missing = [c for c in feature_names if c not in frame.columns]\n        if missing:\n            raise RuntimeError(f"Missing CTG feature columns: {missing}")\n        features = frame[feature_names].apply(pd.to_numeric, errors="coerce")\n        target = pd.to_numeric(frame["NSP"], errors="coerce")\n    else:\n        raise RuntimeError(f"Unrecognized CTG workbook columns: {frame.columns.tolist()}")\n    valid = target.isin([1, 2, 3]) & features.notna().all(axis=1)\n    features = features.loc[valid]\n    target = target.loc[valid]\n    if len(features) != 2126:\n        raise RuntimeError(f"Expected 2126 CTG cases, obtained {len(features)}")\n    y = target.to_numpy(dtype=int)\n    counts = dict(zip(*np.unique(y, return_counts=True)))\n    if counts != {1: 1655, 2: 295, 3: 176}:\n        raise RuntimeError(f"Unexpected CTG class counts: {counts}")\n    return features.to_numpy(dtype=float), y.astype(float), [str(c) for c in features.columns]\n'''
+          loader = '''def load_ctg(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:\n    frame = pd.read_excel(path, sheet_name="Data", skipfooter=3, engine="xlrd")\n    if all(c in frame.columns for c in range(1, 24)):\n        selected = frame[list(range(1, 24))].apply(pd.to_numeric, errors="coerce")\n        features = selected[list(range(1, 22))]\n        target = selected[23]\n    elif "NSP" in frame.columns:\n        feature_names = ["LB", "AC", "FM", "UC", "DL", "DS", "DP", "ASTV", "MSTV", "ALTV", "MLTV", "Width", "Min", "Max", "Nmax", "Nzeros", "Mode", "Mean", "Median", "Variance", "Tendency"]\n        missing = [c for c in feature_names if c not in frame.columns]\n        if missing:\n            raise RuntimeError(f"Missing CTG columns: {missing}")\n        features = frame[feature_names].apply(pd.to_numeric, errors="coerce")\n        target = pd.to_numeric(frame["NSP"], errors="coerce")\n    else:\n        raise RuntimeError(f"Unrecognized CTG columns: {frame.columns.tolist()}")\n    valid = target.isin([1, 2, 3]) & features.notna().all(axis=1)\n    features, target = features.loc[valid], target.loc[valid]\n    if len(features) != 2126:\n        raise RuntimeError(f"Expected 2126 CTG cases, obtained {len(features)}")\n    y = target.to_numpy(dtype=int)\n    counts = dict(zip(*np.unique(y, return_counts=True)))\n    if counts != {1: 1655, 2: 295, 3: 176}:\n        raise RuntimeError(f"Unexpected CTG class counts: {counts}")\n    return features.to_numpy(dtype=float), y.astype(float), [str(c) for c in features.columns]\n'''
           s = s[:start] + loader + s[end:]
           p.write_text(s, encoding='utf-8')
           PY
           python -m compileall -q candidate_experiments
 
-      - name: Run Section 4.3 ICLR split-panel candidate
-        shell: bash
+      - name: Run Section 4.3 candidate
         run: |
           set -euo pipefail
           mkdir -p candidate_results/section43_iclr
-          python candidate_experiments/iclr_split_panel.py \
-            --input-root candidate_data \
-            --output-dir candidate_results/section43_iclr \
-            --seeds 50 \
-            --null-reps 1000
+          python candidate_experiments/iclr_split_panel.py --input-root candidate_data --output-dir candidate_results/section43_iclr --seeds 50 --null-reps 1000
 
-      - name: Run Section 4.4 clinical triage rank-aggregation candidate
-        shell: bash
+      - name: Run Section 4.4 candidate
         run: |
           set -euo pipefail
           mkdir -p candidate_results/section44_triage
-          python candidate_experiments/triage_rank_aggregation.py \
-            --ctg-xls candidate_data/triage/CTG.xls \
-            --mammography-npz candidate_data/triage/23_mammography.npz \
-            --output-dir candidate_results/section44_triage
+          python candidate_experiments/triage_rank_aggregation.py --ctg-xls candidate_data/triage/CTG.xls --mammography-npz candidate_data/triage/23_mammography.npz --output-dir candidate_results/section44_triage
 
-      - name: Independent output QA and provenance
-        shell: bash
+      - name: Independent QA and provenance
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -102,21 +85,21 @@ jobs:
           from pathlib import Path
           import numpy as np
           import pandas as pd
-
           root = Path('candidate_results')
           iclr = pd.read_csv(root/'section43_iclr/iclr_split_panel_summary.csv')
           cal = pd.read_csv(root/'section43_iclr/iclr_theorem3_calibration.csv')
           tri = pd.read_csv(root/'section44_triage/triage_ra_metrics.csv')
           primary = pd.read_csv(root/'section44_triage/triage_ra_primary_summary.csv')
-          checks = {
+          raw = {
               'iclr_years': set(iclr.year.astype(int)) == {2023, 2024},
               'iclr_tau_range': iclr.tau_mean.between(-1, 1).all(),
               'calibration_finite': np.isfinite(cal.select_dtypes(include=[np.number]).to_numpy()).all(),
               'triage_two_datasets': primary.dataset.nunique() == 2,
-              'triage_five_aggregators_per_dataset': primary.groupby('dataset').size().eq(5).all(),
+              'five_aggregators_per_dataset': primary.groupby('dataset').size().eq(5).all(),
               'trc_range': tri.trc.between(-1, 1).all(),
-              'manuscript_not_present': not Path('manuscript').exists(),
+              'manuscript_absent': not Path('manuscript').exists(),
           }
+          checks = {k: bool(v) for k, v in raw.items()}
           if not all(checks.values()):
               raise SystemExit(json.dumps(checks, indent=2))
           (root/'QA_STATUS.json').write_text(json.dumps({'all_pass': True, 'checks': checks}, indent=2), encoding='utf-8')
@@ -126,17 +109,13 @@ jobs:
           cat > candidate_results/SOURCE_PROVENANCE.md <<'EOF'
           # Source provenance
 
-          ## Section 4.3 candidate
-          - ICLR 2023 and 2024 normalized OpenReview review records.
-          - Source: `wutaghost/LLMscore-ICLR-OpenReview`.
-          - Fixed commit: `29acea11ffe83efcc84f0f4cb123ab5c0c27d72a`.
+          ICLR 2023/2024 normalized OpenReview reviews: `wutaghost/LLMscore-ICLR-OpenReview`, commit `29acea11ffe83efcc84f0f4cb123ab5c0c27d72a`.
 
-          ## Section 4.4 candidate
-          - UCI Cardiotocography, official dataset ID 193 static archive.
-          - ADBench Mammography, fixed commit `3dac8221081e190f157d78e93bfa8867f90d0965`.
+          UCI Cardiotocography: official dataset ID 193 static archive.
 
-          Labels were excluded from detectors and aggregation rules and used only for evaluation.
-          This candidate screen does not contain or modify the TRC manuscript or PDF.
+          ADBench Mammography: `Minqi824/ADBench`, commit `3dac8221081e190f157d78e93bfa8867f90d0965`, `adbench/datasets/Classical/23_mammography.npz`.
+
+          Labels were excluded from detectors and aggregation rules and used only for evaluation. This package does not modify the TRC manuscript or PDF.
           EOF
           cp -a candidate_experiments candidate_results/code_used
           cp -a candidate_data candidate_results/data_used
