@@ -1,0 +1,96 @@
+name: Publish TREC DL candidate results
+
+on:
+  push:
+    branches:
+      - trc-43-candidate-screen
+    paths:
+      - .github/workflows/trc_trec_dl_ra_publish.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-trec-results:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install numpy pandas scipy matplotlib tabulate
+      - name: Download official qrels and submitted runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p trec_data/2019/runs trec_data/2020/runs trec_results
+          curl -L --fail --retry 3 https://trec.nist.gov/data/deep/2019qrels-pass.txt -o trec_data/2019/qrels.txt
+          curl -L --fail --retry 3 https://trec.nist.gov/data/deep/2020qrels-pass.txt -o trec_data/2020/qrels.txt
+          python - <<'PY'
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          from urllib.parse import urljoin
+          import re
+          specs={'2019':'https://trec.nist.gov/results/trec28/deep/','2020':'https://trec.nist.gov/results/trec29/deep/'}
+          for year,base in specs.items():
+              html=urlopen(Request(base,headers={'User-Agent':'TRC audit'}),timeout=60).read().decode('utf-8','replace')
+              hrefs=re.findall(r'href=["\']([^"\']+)["\']',html,flags=re.I)
+              urls=sorted(set(urljoin(base,h) for h in hrefs if h.rsplit('/',1)[-1].lower().startswith('input.')))
+              if not urls: raise RuntimeError(f'No run links for {year}: {hrefs[:20]}')
+              Path(f'trec_data/{year}/run_urls.txt').write_text('\n'.join(urls)+'\n')
+              for url in urls:
+                  name=url.rsplit('/',1)[-1]
+                  target=Path(f'trec_data/{year}/runs')/name
+                  try:
+                      target.write_bytes(urlopen(Request(url,headers={'User-Agent':'TRC audit'}),timeout=120).read())
+                  except Exception as exc:
+                      print('WARN',url,exc)
+          PY
+      - name: Run both years
+        shell: bash
+        run: |
+          set -euo pipefail
+          python candidate_experiments/trec_dl_rank_aggregation.py --year 2019 --qrels trec_data/2019/qrels.txt --run-dir trec_data/2019/runs --output-dir trec_results/2019 --m 10 --tail-reps 200 --within-reps 200
+          python candidate_experiments/trec_dl_rank_aggregation.py --year 2020 --qrels trec_data/2020/qrels.txt --run-dir trec_data/2020/runs --output-dir trec_results/2020 --m 10 --tail-reps 200 --within-reps 200
+      - name: Build compact report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import pandas as pd
+          out=['# TREC Deep Learning rank-aggregation candidate results','']
+          qa={}
+          for year in ['2019','2020']:
+              r=Path('trec_results')/year
+              q=pd.read_csv(r/'query_method_metrics.csv')
+              s=pd.read_csv(r/'tail_boundary_stress.csv')
+              p=pd.read_csv(r/'pairwise_discrimination.csv')
+              meta=json.loads((r/'metadata.json').read_text())
+              macro=q.groupby('method')[['trc','within_component_over_total','boundary_component_over_total','full_kendall_tau_b','top_only_kendall_tau_b','ndcg_at_m','ap_high_at_m','ap_any_at_m']].mean().sort_values('trc',ascending=False)
+              out += [f'## {year}','',f"Eligible queries: {q.qid.nunique()}",f"Qualifying submitted runs: {meta['qualifying_run_count']}",'',macro.to_markdown(),'']
+              out += [f"Top-only tie/undefined but TRC differs: {int(p.top_only_tie_or_undefined_but_trc_diff.sum())} / {len(p)}",f"Full Kendall near-tie but TRC differs: {int(p.full_near_tie_but_trc_diff.sum())} / {len(p)}",f"TRC-NDCG same nonzero direction: {int(p.trc_ndcg_same_direction.sum())} / {len(p)}",f"Maximum TRC change after tail-only permutation: {s.tail_trc_max_abs_change.max():.12g}",f"Median full-Kendall SD after tail-only permutation: {s.tail_full_kendall_sd.median():.6g}",f"Median TRC SD after within-top permutation: {s.within_permutation_trc_sd.median():.6g}",f"Median beneficial boundary-swap delta TRC: {s.swap_delta_trc.median():.6g}",'']
+              qa[year]={'queries':int(q.qid.nunique()),'runs':int(meta['qualifying_run_count']),'tail_trc_max_change':float(s.tail_trc_max_abs_change.max()),'tail_full_kendall_sd_median':float(s.tail_full_kendall_sd.median())}
+          Path('trec_results/RESULTS_REPORT.md').write_text('\n'.join(out),encoding='utf-8')
+          Path('trec_results/QA_STATUS.json').write_text(json.dumps({'all_pass':all(v['queries']>=20 and v['runs']>=3 and v['tail_trc_max_change']<1e-12 and v['tail_full_kendall_sd_median']>0 for v in qa.values()),'years':qa},indent=2),encoding='utf-8')
+          PY
+      - name: Commit compact results
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf candidate_report_trec
+          mkdir -p candidate_report_trec/2019 candidate_report_trec/2020
+          cp trec_results/RESULTS_REPORT.md trec_results/QA_STATUS.json candidate_report_trec/
+          for year in 2019 2020; do
+            cp trec_results/$year/macro_summary.csv trec_results/$year/pairwise_discrimination.csv trec_results/$year/tail_boundary_stress.csv trec_results/$year/metadata.json candidate_report_trec/$year/
+          done
+          sha256sum candidate_report_trec/* candidate_report_trec/2019/* candidate_report_trec/2020/* > candidate_report_trec/SHA256SUMS.txt
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add candidate_report_trec
+          git commit -m "[skip ci] Publish TREC DL candidate results"
+          git push origin HEAD:trc-43-candidate-screen
