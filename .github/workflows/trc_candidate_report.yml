@@ -1,0 +1,71 @@
+name: Publish TRC candidate experiment reports
+
+on:
+  push:
+    branches:
+      - trc-43-candidate-screen
+    paths:
+      - .github/workflows/trc_candidate_report.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download successful candidate-screen artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/10048991677/zip" \
+            -o candidate-artifact.zip
+          mkdir artifact
+          unzip -q candidate-artifact.zip -d artifact
+          find artifact -maxdepth 4 -type f | sort
+
+      - name: Publish compact result files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf candidate_report
+          mkdir -p candidate_report
+          for name in \
+            QA_STATUS.json \
+            SOURCE_PROVENANCE.md \
+            iclr_split_panel_summary.csv \
+            iclr_theorem3_calibration.csv \
+            iclr_split_panel_metadata.json \
+            triage_ra_primary_summary.csv \
+            triage_ra_metrics.csv \
+            triage_ra_pairwise_comparisons.csv \
+            triage_ra_leave_one_detector_out.csv \
+            triage_ra_metadata.json; do
+            src=$(find artifact -type f -name "$name" -print -quit)
+            if [ -n "$src" ]; then
+              cp "$src" "candidate_report/$name"
+            fi
+          done
+          test -s candidate_report/triage_ra_primary_summary.csv
+          test -s candidate_report/iclr_split_panel_summary.csv
+          sha256sum candidate_report/* > candidate_report/SHA256SUMS.txt
+
+      - name: Commit report files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add candidate_report
+          git commit -m "[skip ci] Publish TRC candidate experiment summaries"
+          git push origin HEAD:trc-43-candidate-screen
