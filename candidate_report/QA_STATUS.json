@@ -1,0 +1,12 @@
+{
+  "all_pass": true,
+  "checks": {
+    "iclr_years": true,
+    "iclr_tau_range": true,
+    "calibration_finite": true,
+    "triage_two_datasets": true,
+    "five_aggregators_per_dataset": true,
+    "trc_range": true,
+    "manuscript_absent": true
+  }
+}
