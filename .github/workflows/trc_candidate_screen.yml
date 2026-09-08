@@ -1,0 +1,153 @@
+name: TRC alternative application candidate screen
+
+on:
+  push:
+    branches:
+      - trc-43-candidate-screen
+  workflow_dispatch:
+
+jobs:
+  candidate-screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install analysis dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install numpy pandas scipy matplotlib scikit-learn xlrd openpyxl
+
+      - name: Download fixed-source candidate datasets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p candidate_data/ICLR_2023 candidate_data/ICLR_2024 candidate_data/triage
+
+          ICLR_COMMIT=29acea11ffe83efcc84f0f4cb123ab5c0c27d72a
+          ICLR_BASE="https://raw.githubusercontent.com/wutaghost/LLMscore-ICLR-OpenReview/${ICLR_COMMIT}/data"
+          curl -L --fail --retry 3 "${ICLR_BASE}/ICLR_2023/reviews.jsonl.gz" -o candidate_data/ICLR_2023/reviews.jsonl.gz
+          curl -L --fail --retry 3 "${ICLR_BASE}/ICLR_2024/reviews.jsonl.gz" -o candidate_data/ICLR_2024/reviews.jsonl.gz
+
+          curl -L --fail --retry 3 "https://archive.ics.uci.edu/static/public/193/cardiotocography.zip" -o candidate_data/triage/cardiotocography.zip
+          unzip -j -o candidate_data/triage/cardiotocography.zip '*CTG.xls' -d candidate_data/triage
+          test -s candidate_data/triage/CTG.xls
+
+          ADBENCH_COMMIT=3dac8221081e190f157d78e93bfa8867f90d0965
+          curl -L --fail --retry 3 "https://raw.githubusercontent.com/Minqi824/ADBench/${ADBENCH_COMMIT}/adbench/datasets/Classical/23_mammography.npz" -o candidate_data/triage/23_mammography.npz
+          test -s candidate_data/triage/23_mammography.npz
+
+      - name: Apply audited candidate-script corrections
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('candidate_experiments/triage_rank_aggregation.py')
+          s = p.read_text(encoding='utf-8')
+
+          old_agg = '''    # Wins across base rankings; a source-balanced pairwise rule.\n    wins = np.zeros(n, dtype=float)\n    for col in range(ranks.shape[1]):\n        wins += n - ranks[:, col]\n    aggregators["Pairwise win score"] = stable_order_desc(wins)\n'''
+          new_agg = '''    # Best-rank fusion is distinct from Borda for complete rankings.\n    # It rewards a case ranked highly by at least one detector and uses the\n    # mean normalized rank only as a deterministic secondary criterion.\n    best_rank = pct.min(axis=1)\n    mean_rank = pct.mean(axis=1)\n    aggregators["Best-rank fusion"] = np.lexsort((np.arange(n), mean_rank, best_rank)).astype(int)\n'''
+          if old_agg not in s:
+              raise SystemExit('Expected pairwise-win block not found')
+          s = s.replace(old_agg, new_agg)
+          s = s.replace('"Pairwise win score"', '"Best-rank fusion"')
+
+          start = s.index('def load_ctg(')
+          end = s.index('\n\ndef load_mammography', start)
+          new_loader = '''def load_ctg(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:\n    # Match the official UCI workbook convention: columns 1--21 are the\n    # physiological features, column 22 is the auxiliary morphology class,\n    # and column 23 is the ordinal fetal-state label NSP.\n    frame = pd.read_excel(path, sheet_name="Data", skipfooter=3, engine="xlrd")\n    if all(c in frame.columns for c in range(1, 24)):\n        selected = frame[list(range(1, 24))].apply(pd.to_numeric, errors="coerce")\n        features = selected[list(range(1, 22))]\n        target = selected[23]\n    elif "NSP" in frame.columns:\n        feature_names = [\n            "LB", "AC", "FM", "UC", "DL", "DS", "DP", "ASTV",\n            "MSTV", "ALTV", "MLTV", "Width", "Min", "Max", "Nmax",\n            "Nzeros", "Mode", "Mean", "Median", "Variance", "Tendency"\n        ]\n        missing = [c for c in feature_names if c not in frame.columns]\n        if missing:\n            raise RuntimeError(f"Missing CTG feature columns: {missing}")\n        features = frame[feature_names].apply(pd.to_numeric, errors="coerce")\n        target = pd.to_numeric(frame["NSP"], errors="coerce")\n    else:\n        raise RuntimeError(f"Unrecognized CTG workbook columns: {frame.columns.tolist()}")\n    valid = target.isin([1, 2, 3]) & features.notna().all(axis=1)\n    features = features.loc[valid]\n    target = target.loc[valid]\n    if len(features) != 2126:\n        raise RuntimeError(f"Expected 2126 CTG cases, obtained {len(features)}")\n    y = target.to_numpy(dtype=int)\n    counts = dict(zip(*np.unique(y, return_counts=True)))\n    if counts != {1: 1655, 2: 295, 3: 176}:\n        raise RuntimeError(f"Unexpected CTG class counts: {counts}")\n    return features.to_numpy(dtype=float), y.astype(float), [str(c) for c in features.columns]\n'''
+          s = s[:start] + new_loader + s[end:]
+          p.write_text(s, encoding='utf-8')
+          PY
+          python -m compileall -q candidate_experiments
+
+      - name: Run 4.3 ICLR split-panel candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p candidate_results/section43_iclr
+          python candidate_experiments/iclr_split_panel.py \
+            --input-root candidate_data \
+            --output-dir candidate_results/section43_iclr \
+            --seeds 50 \
+            --null-reps 1000
+
+      - name: Run 4.4 clinical triage rank-aggregation candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p candidate_results/section44_triage
+          python candidate_experiments/triage_rank_aggregation.py \
+            --ctg-xls candidate_data/triage/CTG.xls \
+            --mammography-npz candidate_data/triage/23_mammography.npz \
+            --output-dir candidate_results/section44_triage
+
+      - name: Independent output QA and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import numpy as np
+          import pandas as pd
+
+          root = Path('candidate_results')
+          iclr = pd.read_csv(root/'section43_iclr/iclr_split_panel_summary.csv')
+          cal = pd.read_csv(root/'section43_iclr/iclr_theorem3_calibration.csv')
+          tri = pd.read_csv(root/'section44_triage/triage_ra_metrics.csv')
+          primary = pd.read_csv(root/'section44_triage/triage_ra_primary_summary.csv')
+
+          checks = {
+              'iclr_years': set(iclr.year.astype(int)) == {2023, 2024},
+              'iclr_tau_range': iclr.bottom_tied_tau_b.between(-1, 1).all() if 'bottom_tied_tau_b' in iclr.columns else iclr.tau_mean.between(-1, 1).all(),
+              'calibration_finite': np.isfinite(cal.select_dtypes(include=[np.number]).to_numpy()).all(),
+              'triage_two_datasets': primary.dataset.nunique() == 2,
+              'triage_five_aggregators_per_dataset': primary.groupby('dataset').size().eq(5).all(),
+              'trc_range': tri.trc.between(-1, 1).all(),
+              'manuscript_untouched': not Path('manuscript').exists(),
+          }
+          if not all(checks.values()):
+              raise SystemExit(json.dumps(checks, indent=2))
+          (root/'QA_STATUS.json').write_text(json.dumps({'all_pass': True, 'checks': checks}, indent=2), encoding='utf-8')
+          PY
+
+          python --version > candidate_results/PYTHON_VERSION.txt
+          python -m pip freeze > candidate_results/PIP_FREEZE.txt
+          cat > candidate_results/SOURCE_PROVENANCE.md <<'EOF'
+          # Source provenance
+
+          ## Section 4.3 candidate
+          - ICLR 2023 and 2024 normalized OpenReview review records.
+          - Source repository: `wutaghost/LLMscore-ICLR-OpenReview`.
+          - Fixed source commit: `29acea11ffe83efcc84f0f4cb123ab5c0c27d72a`.
+          - Files: `data/ICLR_2023/reviews.jsonl.gz`, `data/ICLR_2024/reviews.jsonl.gz`.
+
+          ## Section 4.4 candidate
+          - UCI Cardiotocography, dataset ID 193, official static archive.
+          - ADBench Mammography, fixed source commit `3dac8221081e190f157d78e93bfa8867f90d0965`, file `adbench/datasets/Classical/23_mammography.npz`.
+
+          Outcome labels were not supplied to any detector or rank-aggregation rule. They were used only for evaluation.
+          No manuscript source or PDF was modified in this candidate screen.
+          EOF
+          cp -a candidate_experiments candidate_results/code_used
+          cp -a candidate_data candidate_results/data_used
+          find candidate_results -type f -print0 | sort -z | xargs -0 sha256sum > candidate_results/SHA256SUMS.txt
+
+      - name: Upload candidate-screen package
+        uses: actions/upload-artifact@v4
+        with:
+          name: trc-alternative-candidate-screen
+          path: candidate_results
+          if-no-files-found: error
+          compression-level: 6
