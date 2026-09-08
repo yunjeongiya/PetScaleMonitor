@@ -1,0 +1,74 @@
+name: TRC data bridge
+
+on:
+  push:
+    branches:
+      - trc-data-bridge-r15
+  workflow_dispatch:
+
+jobs:
+  build-data-bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.4.2'
+      - name: Download Broad-Sanger analysis snapshots and upstream scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p trc-data/Broad_Sanger/raw trc-data/Broad_Sanger/upstream_code
+          base=https://raw.githubusercontent.com/DepMap-Analytics/Comparative-Analysis/471c1aaf94cfbf451e9c0fa9fdc1f12c4da93156
+          curl -L --fail --retry 3 "$base/ExternalData/RES_B_red.RData" -o trc-data/Broad_Sanger/raw/RES_B_red.RData
+          curl -L --fail --retry 3 "$base/ExternalData/RES_S_red.RData" -o trc-data/Broad_Sanger/raw/RES_S_red.RData
+          curl -L --fail --retry 3 "$base/PipeLines/DepMarkers_agreement.R" -o trc-data/Broad_Sanger/upstream_code/DepMarkers_agreement.R
+          curl -L --fail --retry 3 "$base/PipeLines/Generate_unscaledLogFC.R" -o trc-data/Broad_Sanger/upstream_code/Generate_unscaledLogFC.R
+          curl -L --fail --retry 3 "$base/README.md" -o trc-data/Broad_Sanger/upstream_code/README.md
+      - name: Export Broad-Sanger RData to CSV
+        shell: bash
+        run: |
+          set -euo pipefail
+          Rscript - <<'RS'
+          load('trc-data/Broad_Sanger/raw/RES_B_red.RData')
+          stopifnot(exists('RES_B'))
+          write.csv(RES_B, 'trc-data/Broad_Sanger/RES_B_red.csv', row.names=TRUE)
+          rm(RES_B)
+          load('trc-data/Broad_Sanger/raw/RES_S_red.RData')
+          stopifnot(exists('RES_S'))
+          write.csv(RES_S, 'trc-data/Broad_Sanger/RES_S_red.csv', row.names=TRUE)
+          RS
+      - name: Download LETOR MQ2008-agg and MQ2007-agg inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for ds in MQ2008-agg MQ2007-agg; do
+            mkdir -p "trc-data/LETOR/$ds"
+            for i in 1 2 3 4 5; do
+              url="https://raw.githubusercontent.com/GeorgeSanchezTR/MRRF_Experiments/f3600002f05acf123093b5ed53213e3ed29550af/$ds/A${i}.txt"
+              curl -L --fail --retry 3 "$url" -o "trc-data/LETOR/$ds/A${i}.txt"
+            done
+          done
+      - name: Write provenance and hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > trc-data/PROVENANCE.md <<'EOF'
+          # TRC data bridge provenance
+
+          Broad-Sanger processed analysis snapshots and upstream scripts were retrieved from commit `471c1aaf94cfbf451e9c0fa9fdc1f12c4da93156` of `DepMap-Analytics/Comparative-Analysis`.
+
+          LETOR MQ2008-agg and MQ2007-agg A1-A5 files were retrieved from commit `f3600002f05acf123093b5ed53213e3ed29550af` of `GeorgeSanchezTR/MRRF_Experiments`.
+
+          This bundle contains the exact analysis inputs used by the downstream TRC scripts. The Broad-Sanger files are author-released processed analysis snapshots, not the full guide-level Figshare archive.
+          EOF
+          find trc-data -type f -print0 | sort -z | xargs -0 sha256sum > trc-data/SHA256SUMS.txt
+      - name: Upload data bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: trc-data-bundle-r15
+          path: trc-data
+          if-no-files-found: error
+          compression-level: 6
