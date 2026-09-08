@@ -1,0 +1,124 @@
+name: TREC DL rank-aggregation candidate screen
+
+on:
+  push:
+    branches:
+      - trc-43-candidate-screen
+    paths:
+      - candidate_experiments/trec_dl_rank_aggregation.py
+      - .github/workflows/trc_trec_dl_ra_screen.yml
+  workflow_dispatch:
+
+jobs:
+  trec-screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install numpy pandas scipy matplotlib
+
+      - name: Download official qrels and submitted passage runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p trec_data/2019/runs trec_data/2020/runs trec_results
+          curl -L --fail --retry 3 https://trec.nist.gov/data/deep/2019qrels-pass.txt -o trec_data/2019/qrels.txt
+          curl -L --fail --retry 3 https://trec.nist.gov/data/deep/2020qrels-pass.txt -o trec_data/2020/qrels.txt
+          python - <<'PY'
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          from urllib.parse import urljoin
+          import re, time
+
+          specs = {
+              '2019': 'https://trec.nist.gov/results/trec28/deep/',
+              '2020': 'https://trec.nist.gov/results/trec29/deep/',
+          }
+          for year, base in specs.items():
+              req = Request(base, headers={'User-Agent':'TRC reproducibility audit'})
+              html = urlopen(req, timeout=60).read().decode('utf-8', errors='replace')
+              Path(f'trec_data/{year}/index.html').write_text(html, encoding='utf-8')
+              hrefs = re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.I)
+              candidates=[]
+              for href in hrefs:
+                  name=href.rsplit('/',1)[-1]
+                  low=name.lower()
+                  if low.startswith('input.') or (low.endswith('.gz') and 'input' in low):
+                      candidates.append(urljoin(base, href))
+              candidates=sorted(set(candidates))
+              if not candidates:
+                  raise RuntimeError(f'No input-run links found at {base}; first hrefs={hrefs[:30]}')
+              Path(f'trec_data/{year}/run_urls.txt').write_text('\n'.join(candidates)+'\n', encoding='utf-8')
+              for j,url in enumerate(candidates,1):
+                  name=url.rsplit('/',1)[-1]
+                  target=Path(f'trec_data/{year}/runs')/name
+                  req=Request(url, headers={'User-Agent':'TRC reproducibility audit'})
+                  try:
+                      target.write_bytes(urlopen(req, timeout=120).read())
+                  except Exception as exc:
+                      print(f'WARN failed {url}: {exc}')
+                  if j % 20 == 0:
+                      print(year, j, 'of', len(candidates))
+          PY
+          test $(find trec_data/2019/runs -type f | wc -l) -ge 3
+          test $(find trec_data/2020/runs -type f | wc -l) -ge 3
+
+      - name: Run candidate experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python candidate_experiments/trec_dl_rank_aggregation.py --year 2019 --qrels trec_data/2019/qrels.txt --run-dir trec_data/2019/runs --output-dir trec_results/2019 --m 10 --tail-reps 200 --within-reps 200
+          python candidate_experiments/trec_dl_rank_aggregation.py --year 2020 --qrels trec_data/2020/qrels.txt --run-dir trec_data/2020/runs --output-dir trec_results/2020 --m 10 --tail-reps 200 --within-reps 200
+
+      - name: Independent QA and compact report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import numpy as np
+          import pandas as pd
+          out=[]
+          qa={}
+          for year in ['2019','2020']:
+              root=Path('trec_results')/year
+              q=pd.read_csv(root/'query_method_metrics.csv')
+              s=pd.read_csv(root/'tail_boundary_stress.csv')
+              p=pd.read_csv(root/'pairwise_discrimination.csv')
+              meta=json.loads((root/'metadata.json').read_text())
+              qa[f'{year}_queries_ge_20']=q.qid.nunique()>=20
+              qa[f'{year}_runs_ge_3']=meta['qualifying_run_count']>=3
+              qa[f'{year}_trc_range']=q.trc.between(-1,1).all()
+              qa[f'{year}_tail_trc_invariant']=s.tail_trc_max_abs_change.max()<1e-12
+              qa[f'{year}_tail_full_kendall_changes']=s.tail_full_kendall_sd.median()>0
+              macro=q.groupby('method')[['trc','within_component_over_total','boundary_component_over_total','full_kendall_tau_b','top_only_kendall_tau_b','ndcg_at_m','ap_high_at_m','ap_any_at_m']].mean().sort_values('trc',ascending=False)
+              out += [f'## TREC DL {year}', '', f"Eligible queries: {q.qid.nunique()}; qualifying runs: {meta['qualifying_run_count']}", '', macro.to_markdown(), '', f"Top-only tie/undefined but TRC differs: {int(p.top_only_tie_or_undefined_but_trc_diff.sum())} of {len(p)}", f"Full Kendall near-tie but TRC differs: {int(p.full_near_tie_but_trc_diff.sum())} of {len(p)}", f"Median tail-only full-Kendall SD: {s.tail_full_kendall_sd.median():.6g}", f"Maximum tail-only TRC change: {s.tail_trc_max_abs_change.max():.6g}", f"Median within-top permutation TRC SD: {s.within_permutation_trc_sd.median():.6g}", f"Median beneficial boundary-swap delta TRC: {s.swap_delta_trc.median():.6g}", '']
+          if not all(bool(v) for v in qa.values()):
+              raise SystemExit(json.dumps(qa,indent=2))
+          Path('trec_results/RESULTS_REPORT.md').write_text('# TREC DL rank-aggregation candidate\n\n'+'\n'.join(out),encoding='utf-8')
+          Path('trec_results/QA_STATUS.json').write_text(json.dumps({'all_pass':True,'checks':qa},indent=2),encoding='utf-8')
+          PY
+          cp candidate_experiments/trec_dl_rank_aggregation.py trec_results/
+          cp -a trec_data trec_results/data_used
+          python --version > trec_results/PYTHON_VERSION.txt
+          python -m pip freeze > trec_results/PIP_FREEZE.txt
+          find trec_results -type f -print0 | sort -z | xargs -0 sha256sum > trec_results/SHA256SUMS.txt
+
+      - name: Upload TREC candidate package
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trc-trec-dl-ra-candidate
+          path: |
+            trec_results
+            trec_data/*/index.html
+            trec_data/*/run_urls.txt
+          if-no-files-found: warn
+          compression-level: 6
