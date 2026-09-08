@@ -51,6 +51,20 @@ jobs:
               curl -L --fail --retry 3 "$url" -o "trc-data/LETOR/$ds/A${i}.txt"
             done
           done
+      - name: Download CDC PLACES 2022 release and CDC-ATSDR SVI 2022 county data
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p trc-data/CDC
+          curl -L --fail --retry 3 'https://data.cdc.gov/api/views/xyst-f73f/rows.csv?accessType=DOWNLOAD' -o trc-data/CDC/PLACES_County_GIS_2022_release.csv
+          curl -L --fail --retry 3 'https://svi.cdc.gov/Documents/Data/2022/csv/states_counties/SVI_2022_US_county.csv' -o trc-data/CDC/SVI_2022_US_county.csv
+          python - <<'PY'
+          import pandas as pd
+          p=pd.read_csv('trc-data/CDC/PLACES_County_GIS_2022_release.csv', nrows=5)
+          s=pd.read_csv('trc-data/CDC/SVI_2022_US_county.csv', nrows=5)
+          assert 'CountyFIPS' in p.columns, p.columns.tolist()
+          assert any(c in s.columns for c in ['FIPS','STCNTY']), s.columns.tolist()
+          PY
       - name: Write provenance and hashes
         shell: bash
         run: |
@@ -62,13 +76,15 @@ jobs:
 
           LETOR MQ2008-agg and MQ2007-agg A1-A5 files were retrieved from commit `f3600002f05acf123093b5ed53213e3ed29550af` of `GeorgeSanchezTR/MRRF_Experiments`.
 
+          CDC PLACES county data were retrieved from the official Socrata dataset `xyst-f73f` (2022 release), and CDC/ATSDR SVI county data were retrieved from the official 2022 county CSV endpoint.
+
           This bundle contains the exact analysis inputs used by the downstream TRC scripts. The Broad-Sanger files are author-released processed analysis snapshots, not the full guide-level Figshare archive.
           EOF
           find trc-data -type f -print0 | sort -z | xargs -0 sha256sum > trc-data/SHA256SUMS.txt
-      - name: Upload data bundle
+      - name: Upload complete data bundle
         uses: actions/upload-artifact@v4
         with:
-          name: trc-data-bundle-r15
+          name: trc-data-bundle-r15-complete
           path: trc-data
           if-no-files-found: error
           compression-level: 6
