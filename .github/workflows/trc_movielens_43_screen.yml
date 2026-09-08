@@ -1,0 +1,89 @@
+name: MovieLens Section 4.3 candidate screen
+
+on:
+  push:
+    branches:
+      - trc-43-candidate-screen
+    paths:
+      - candidate_experiments/movielens_split_panel.py
+      - .github/workflows/trc_movielens_43_screen.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  movielens-screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install numpy pandas scipy tabulate
+      - name: Download fixed MovieLens 1M release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p movielens_data movielens_results
+          curl -L --fail --retry 3 https://files.grouplens.org/datasets/movielens/ml-1m.zip -o movielens_data/ml-1m.zip
+          sha256sum movielens_data/ml-1m.zip > movielens_data/SHA256SUMS.txt
+      - name: Run split-panel experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python candidate_experiments/movielens_split_panel.py --zip movielens_data/ml-1m.zip --output-dir movielens_results --seeds 100 --min-count 30 --null-reps 2000
+      - name: Independent QA and report
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          import pandas as pd
+          s=pd.read_csv('movielens_results/movielens_split_panel_summary.csv')
+          c=pd.read_csv('movielens_results/movielens_theorem3_calibration.csv')
+          r=pd.read_csv('movielens_results/movielens_split_panel_results.csv')
+          checks={
+            '100_splits':int(r.seed.nunique())==100,
+            'large_universe':float(r.n.median())>=500,
+            'all_tau_in_range':bool(r.bottom_tied_tau_b.between(-1,1).all()),
+            'null_sd_calibrated':bool(c.null_z_sd.between(.90,1.10).all()),
+            'null_tail_calibrated':bool(c.null_abs_z_gt_1_96.between(.03,.07).all()),
+            'tie_break_small':float(r.tie_break_abs_difference.max())<.02,
+          }
+          report=['# MovieLens split-user-panel candidate results','',f"Eligible-movie universe median: {r.n.median():.0f}",f"Repeated disjoint user splits: {r.seed.nunique()}",'','## Proportional-depth summary','',s.to_markdown(index=False),'','## Theorem 3 finite-null calibration','',c.to_markdown(index=False),'','## QA','',json.dumps(checks,indent=2)]
+          Path('movielens_results/RESULTS_REPORT.md').write_text('\n'.join(report),encoding='utf-8')
+          Path('movielens_results/QA_STATUS.json').write_text(json.dumps({'all_pass':all(checks.values()),'checks':checks},indent=2),encoding='utf-8')
+          if not all(checks.values()):
+            raise SystemExit(json.dumps(checks,indent=2))
+          PY
+          cp candidate_experiments/movielens_split_panel.py movielens_results/
+          cp movielens_data/SHA256SUMS.txt movielens_results/SOURCE_SHA256SUMS.txt
+          python -m pip freeze > movielens_results/PIP_FREEZE.txt
+          find movielens_results -type f -print0 | sort -z | xargs -0 sha256sum > movielens_results/SHA256SUMS.txt
+      - name: Commit compact results
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf candidate_report_movielens
+          mkdir candidate_report_movielens
+          cp movielens_results/RESULTS_REPORT.md movielens_results/QA_STATUS.json movielens_results/movielens_split_panel_summary.csv movielens_results/movielens_theorem3_calibration.csv movielens_results/metadata.json candidate_report_movielens/
+          sha256sum candidate_report_movielens/* > candidate_report_movielens/SHA256SUMS.txt
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add candidate_report_movielens
+          git commit -m "[skip ci] Publish MovieLens candidate results"
+          git push origin HEAD:trc-43-candidate-screen
+      - name: Upload full experiment package
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trc-movielens-43-candidate
+          path: |
+            movielens_results
+            movielens_data/SHA256SUMS.txt
+          if-no-files-found: warn
+          compression-level: 6
